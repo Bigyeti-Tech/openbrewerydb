@@ -1,82 +1,76 @@
-import { writeFileSync, readFileSync } from "fs";
+import { readFileSync, globSync } from "fs";
 import { join } from "path";
-import glob from "glob-promise";
-import type { Brewery } from "./utils/types";
+import Papa from "papaparse";
+import { Brewery } from "./types.ts";
+import { papaParseOptions } from "./config.ts";
 
-// @ts-ignore
-// csval is a newer library and doesn't have any published types yet
-import csval from "csval";
+function validateFiles(files: string[]) {
+  let valid = true;
+  let totalErrors = 0;
 
-const BREWERY_TYPES = [
-  "micro",
-  "nano",
-  "regional",
-  "brewpub",
-  "large",
-  "planning",
-  "bar",
-  "contract",
-  "proprietor",
-  "taproom",
-  "closed",
-];
+  for (let file of files) {
+    console.log(`📋 Validating ${file}...`);
+    const csv = readFileSync(file, { encoding: "utf-8" });
+    const breweries = Papa.parse<Brewery>(csv, papaParseOptions);
+
+    let errors = [];
+    for (let data of breweries.data) {
+      const result = Brewery.safeParse(data);
+      if (!result.success) {
+        for (let error of result.error.issues) {
+          // IDs are added during the maintance workflow so ignore for now
+          if (error.code === 'invalid_type' && error.path[0] === 'id') {
+            continue;
+          }
+          valid = false;
+
+          errors.push({
+            brewery: data.name,
+            error: error,
+          });
+          console.log(
+            `${data.name}: ${error.path.join(" > ")} - ${error.message}`
+          );
+        }
+      }
+    }
+    if (errors.length) {
+      console.log(`🛑 There are ${errors.length} errors!\n`);
+    }
+    totalErrors += errors.length;
+  }
+
+  return { valid, totalErrors };
+}
 
 const main = async () => {
-  const fileGlob = join(__dirname, "../data/**/*.csv");
+  const startTime = new Date().getTime();
+  const fileGlob = join(import.meta.dirname, "../data/**/*.csv");
 
-  const rules = {
-    $schema: "http://json-schema.org/schema#",
-    type: "object",
-    required: [
-      "id",
-      "name",
-      "brewery_type",
-      "city",
-      "country",
-      "created_at",
-      "updated_at",
-    ],
-    properties: {
-      obdb_id: {
-        type: "string",
-      },
-      name: {
-        type: "string",
-      },
-      brewery_type: {
-        enum: BREWERY_TYPES,
-      },
-      street: {
-        type: "string",
-      },
-      city: {
-        type: "string",
-      },
-      created_at: {
-        type: "string",
-      },
-      updated_at: {
-        type: "string",
-      },
-      country: {
-        type: "string",
-      },
-    },
-  };
+  // Validate individual files
+  let files = globSync(fileGlob).sort();
+  const filesResult = validateFiles(files);
 
-  try {
-    const files = await glob(fileGlob);
-    for (let file of files) {
-      console.log(`📋 Validating ${file}...`);
-      const data = readFileSync(file, { encoding: "utf-8" });
-      const parsed: Brewery = await csval.parseCsv(data);
-      const valid = await csval.validate(parsed, rules);
-    }
-    console.log(`✅  All ${files.length} files are valid!`);
-  } catch (error) {
-    console.error(`${error}`);
-    throw new Error("🛑 Invalid CSV");
+  // Separately validate full dataset CSV
+  const fullDatasetResult = validateFiles([
+    join(import.meta.dirname, "../breweries.csv"),
+  ]);
+
+  const resultText =
+    filesResult.valid && fullDatasetResult.valid
+      ? `✅  All ${files.length + 1} files are valid!`
+      : `🛑 ${
+          filesResult.totalErrors + fullDatasetResult.totalErrors
+        } errors were found.`;
+
+  console.log(`${resultText} (${new Date().getTime() - startTime}ms)`);
+
+  if (!filesResult.valid || !fullDatasetResult.valid) {
+    throw new Error("invalid");
   }
 };
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
